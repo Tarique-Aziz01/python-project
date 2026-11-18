@@ -32,26 +32,35 @@ def _open_browser_when_ready():
 
     Runs in a background thread at startup, so the server works the same
     no matter how it was started (run.bat, run.sh, or plain uvicorn) —
-    no manual tab needed. The port is detected, not assumed: Polyglot
-    normally runs on 8001, but if it was started on 8000 (plain
-    `uvicorn backend.main:app` without --port), the browser opens
-    that port instead.
+    no manual tab needed.
+
+    Wait for Polyglot's own port (8001) for the full window BEFORE ever
+    trying 8000. That order matters: uvicorn runs the app's lifespan
+    startup before it binds the listening socket, so on the first poll
+    8001 is not up yet. If an old project (e.g. NoteWise) is still
+    listening on 8000, grabbing whichever port answers first would open
+    the wrong app. Only if 8001 never appears do we fall back to 8000,
+    which covers plain `uvicorn backend.main:app` without --port.
     """
     import socket
     import time
 
     url = None
-    for _ in range(6):
-        for port in (8001, 8000):
+    for _ in range(12):  # up to ~6s waiting for our own port (8001)
+        try:
+            with socket.create_connection(("127.0.0.1", 8001), timeout=0.5):
+                url = "http://127.0.0.1:8001"
+                break
+        except OSError:
+            time.sleep(0.5)
+    if not url:
+        for _ in range(4):  # plain uvicorn without --port serves on 8000
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                    url = f"http://127.0.0.1:{port}"
+                with socket.create_connection(("127.0.0.1", 8000), timeout=0.5):
+                    url = "http://127.0.0.1:8000"
                     break
             except OSError:
-                continue
-        if url:
-            break
-        time.sleep(0.5)
+                time.sleep(0.5)
     if not url:
         return
     try:
@@ -65,7 +74,8 @@ def _open_browser_when_ready():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    threading.Thread(target=_open_browser_when_ready, daemon=True).start()
+    if os.environ.get("VERCEL") != "1":
+        threading.Thread(target=_open_browser_when_ready, daemon=True).start()
     yield
 
 
